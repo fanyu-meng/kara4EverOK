@@ -442,7 +442,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>卡拉OK</title>
+<title>kara4EverOK · 卡拉永远OK</title>
 <style>
   :root { --bg:#0f1020; --panel:#1a1c34; --line:#2a2d4d; --txt:#fff;
           --blue:#2563eb; --pink:#db2777; --mut:#9aa0c0; }

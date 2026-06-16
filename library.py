@@ -7,6 +7,7 @@ import os
 import re
 import glob
 
+import lyrics
 from separate import CACHE_DIR, MODEL, _find_stems, mirror_instrumental
 
 
@@ -32,6 +33,7 @@ def list_songs():
             "name": name,
             "vocals": vocals,
             "no_vocals": no_vocals,
+            "has_lyrics": lyrics.has_lyrics(digest),
         })
     songs.sort(key=lambda s: s["name"].lower())
     return songs
@@ -49,6 +51,7 @@ def get_song(song_id: str):
         "name": os.path.basename(os.path.dirname(no_vocals)),
         "vocals": vocals,
         "no_vocals": no_vocals,
+        "has_lyrics": lyrics.has_lyrics(song_id),
     }
 
 

@@ -32,10 +32,11 @@ from separate import separate, INSTRUMENTALS_DIR
 from acquire import (search_youtube, download_youtube, best_match_index,
                      list_playlist, to_mp3, predicted_name, DOWNLOADS_DIR)
 import library
+import lyrics
 
 DEVICE = "mps"
 
-STATE = {"player": None, "song": None}
+STATE = {"player": None, "song": None, "song_id": None, "lyrics": []}
 JOBS = {}
 BATCHES = {}
 
@@ -50,6 +51,8 @@ def _load_song(song):
     p.start()
     STATE["player"] = p
     STATE["song"] = song["name"]
+    STATE["song_id"] = song["id"]
+    STATE["lyrics"] = lyrics.parse(lyrics.load(song["id"]) or "")
 
 
 class _Cancelled(Exception):
@@ -101,6 +104,14 @@ def _run_job(job_id, url=None, local_path=None, title="", artist=""):
         _, no_vocals = separate(audio, device=DEVICE, use_cache=True,
                                 cancel=cancel, on_progress=prog)
         job["song_id"] = library.id_for_stems(no_vocals)
+        # best-effort 抓同步歌词：失败/查无都不影响歌曲入库
+        job["stage"] = "fetching_lyrics"
+        try:
+            lrc = lyrics.fetch(title, artist)
+            if lrc:
+                lyrics.save(job["song_id"], lrc)
+        except Exception:  # noqa: BLE001
+            pass
         job["stage"] = "done"
         job["status"] = "done"
     except (_Cancelled, KeyboardInterrupt):
@@ -233,7 +244,8 @@ def build_app():
     @app.get("/library")
     def get_library():
         return JSONResponse(
-            [{"id": s["id"], "name": s["name"]} for s in library.list_songs()])
+            [{"id": s["id"], "name": s["name"], "has_lyrics": s["has_lyrics"]}
+             for s in library.list_songs()])
 
     @app.post("/load")
     def load(req: LoadReq):
@@ -253,10 +265,12 @@ def build_app():
         return {
             "has_song": True,
             "song": STATE["song"],
+            "song_id": STATE["song_id"],
             "mode": mode,
             "paused": paused,
             "pos_sec": pos / p.samplerate,
             "total_sec": total / p.samplerate,
+            "has_lyrics": bool(STATE["lyrics"]),
         }
 
     @app.post("/toggle")
@@ -361,6 +375,29 @@ def build_app():
         return FileResponse(path, filename=f"{song['name']} ({label}).{ext}",
                             media_type=media)
 
+    @app.get("/lyrics")
+    def get_lyrics():
+        """当前播放歌曲的同步歌词行 [{t, text}]。"""
+        return {"lines": STATE["lyrics"]}
+
+    @app.post("/fetch_lyrics/{song_id}")
+    def fetch_lyrics(song_id: str):
+        """给歌库里已有(或歌词不对)的歌补抓/重抓同步歌词。"""
+        song = library.get_song(song_id)
+        if not song:
+            return JSONResponse({"error": "找不到该歌曲"}, status_code=404)
+        # 歌名形如 "歌名-歌手"（acquire 下载命名）；拆不出就整名当搜索词
+        title, _, artist = song["name"].rpartition("-")
+        if not title:
+            title, artist = song["name"], ""
+        lrc = lyrics.fetch(title.strip(), artist.strip())
+        if not lrc:
+            return {"found": False}
+        lyrics.save(song_id, lrc)
+        if STATE["song_id"] == song_id:  # 正在播放这首，刷新内存里的歌词
+            STATE["lyrics"] = lyrics.parse(lrc)
+        return {"found": True}
+
     return app
 
 
@@ -425,6 +462,16 @@ PAGE = """<!doctype html>
   .times { display:flex; justify-content:space-between; font-size:12px; color:var(--mut); }
   .empty { color:var(--mut); }
   .hint { font-size:13px; color:var(--mut); }
+  .lyrics { width:min(640px,90%); height:38vh; overflow-y:auto; text-align:center;
+            display:flex; flex-direction:column; gap:10px; padding:8vh 0;
+            mask-image:linear-gradient(transparent, #000 18%, #000 82%, transparent);
+            -webkit-mask-image:linear-gradient(transparent, #000 18%, #000 82%, transparent); }
+  .lyrics .line { font-size:16px; color:var(--mut); line-height:1.4; transition:all .2s; }
+  .lyrics .line.active { font-size:22px; font-weight:600; color:var(--pink); }
+  .lyrics .placeholder { color:var(--mut); font-size:14px; }
+  .lyrics .lyrbtn { margin:10px auto 0; padding:8px 16px; border:none; border-radius:10px;
+                    background:var(--pink); color:#fff; font-size:13px; cursor:pointer; }
+  .lyrics .lyrbtn:disabled { background:#6b7280; cursor:default; }
   .batchhead { display:flex; align-items:center; justify-content:space-between; gap:8px;
                padding:9px 14px; font-size:12px; color:var(--mut); border-bottom:1px solid var(--line); }
   .batchhead button { font-size:11px; padding:4px 8px; }
@@ -457,6 +504,7 @@ PAGE = """<!doctype html>
   </div>
   <div class="main">
     <div id="song" class="song empty">从右边歌库选一首，或上方搜索下载</div>
+    <div id="lyrics" class="lyrics"></div>
     <div class="progress">
       <input id="bar" type="range" min="0" max="100" value="0" step="0.1" disabled>
       <div class="times"><span id="cur">00:00</span><span id="dur">00:00</span></div>
@@ -471,6 +519,9 @@ PAGE = """<!doctype html>
 <script>
 let seeking = false;
 let activeId = null;
+let lyricLines = [];   // [{t, text}]
+let curLyricIdx = -1;
+let fetchingLyrics = false;
 
 function fmt(s){ s=Math.max(0,Math.floor(s||0)); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
 
@@ -492,7 +543,8 @@ async function loadLibrary(){
     const d = document.createElement('div');
     d.className = 'libitem' + (s.id===activeId?' active':'');
     const name = document.createElement('span');
-    name.className = 'ln'; name.textContent = s.name; name.title = s.name;
+    name.className = 'ln'; name.textContent = (s.has_lyrics ? '🎤 ' : '') + s.name;
+    name.title = s.name + (s.has_lyrics ? '（含歌词）' : '');
     name.onclick = () => loadSong(s.id);
     const dli = document.createElement('a');
     dli.className = 'stemdl'; dli.textContent = '⬇伴奏'; dli.title = '下载伴奏文件';
@@ -509,6 +561,52 @@ async function loadSong(id){
   activeId = id;
   await fetch('/load', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id})});
   loadLibrary();
+  loadLyrics();
+}
+
+async function loadLyrics(){
+  curLyricIdx = -1;
+  try { lyricLines = (await (await fetch('/lyrics')).json()).lines || []; }
+  catch(e){ lyricLines = []; }
+  renderLyrics();
+}
+
+function renderLyrics(){
+  const box = document.getElementById('lyrics');
+  if(lyricLines.length){
+    box.innerHTML = lyricLines.map((l,i) =>
+      `<div class="line" data-i="${i}">${(l.text||'♪').replace(/</g,'&lt;')}</div>`).join('');
+    return;
+  }
+  // 无歌词：占位 + 补抓按钮
+  const dis = fetchingLyrics ? 'disabled' : '';
+  const txt = fetchingLyrics ? '找歌词中…' : '🎤 下载歌词';
+  box.innerHTML = `<div class="placeholder">暂无歌词</div>`+
+    (activeId ? `<button class="lyrbtn" ${dis} onclick="downloadLyrics()">${txt}</button>` : '');
+}
+
+async function downloadLyrics(){
+  if(!activeId || fetchingLyrics) return;
+  fetchingLyrics = true; renderLyrics();
+  let found = false;
+  try { found = (await (await fetch('/fetch_lyrics/'+activeId, {method:'POST'})).json()).found; }
+  catch(e){}
+  fetchingLyrics = false;
+  if(found){ await loadLyrics(); loadLibrary(); }
+  else { renderLyrics(); }
+}
+
+function highlightLyric(posSec){
+  if(!lyricLines.length) return;
+  let idx = -1;
+  for(let i=0;i<lyricLines.length;i++){ if(lyricLines[i].t <= posSec) idx = i; else break; }
+  if(idx === curLyricIdx) return;
+  curLyricIdx = idx;
+  const box = document.getElementById('lyrics');
+  box.querySelectorAll('.line.active').forEach(e => e.classList.remove('active'));
+  if(idx < 0) return;
+  const el = box.querySelector('.line[data-i="'+idx+'"]');
+  if(el){ el.classList.add('active'); el.scrollIntoView({block:'center', behavior:'smooth'}); }
 }
 
 async function doSearch(){
@@ -589,7 +687,7 @@ function cancelDownload(btn){
   fetch('/cancel/'+job, {method:'POST'});
 }
 
-const STAGE_TXT = {queued:'排队中', downloading:'下载', importing:'读取', separating:'分离'};
+const STAGE_TXT = {queued:'排队中', downloading:'下载', importing:'读取', separating:'分离', fetching_lyrics:'找歌词'};
 
 function stageLabel(j){
   let t = STAGE_TXT[j.stage] || '处理';
@@ -694,7 +792,9 @@ async function tick(){
   const play = document.getElementById('play'), vocal = document.getElementById('vocal');
   if(!st.has_song){
     songEl.textContent='从右边歌库选一首，或上方搜索下载'; songEl.className='song empty';
-    play.disabled=vocal.disabled=bar.disabled=true; return;
+    play.disabled=vocal.disabled=bar.disabled=true;
+    if(lyricLines.length){ lyricLines=[]; renderLyrics(); }
+    return;
   }
   songEl.textContent='🎶 '+st.song; songEl.className='song';
   play.disabled=vocal.disabled=bar.disabled=false;
@@ -704,6 +804,10 @@ async function tick(){
     bar.max = st.total_sec; bar.value = st.pos_sec;
     document.getElementById('cur').textContent = fmt(st.pos_sec);
   }
+  if(st.song_id && st.song_id !== activeId){  // 刷新页面/外部载入：同步并拉歌词
+    activeId = st.song_id; loadLyrics();
+  }
+  highlightLyric(st.pos_sec);
 }
 
 loadLibrary();
@@ -713,10 +817,35 @@ setInterval(tick, 500);
 </html>"""
 
 
+def _backfill_lyrics():
+    """后台线程：为歌库里所有尚无歌词的歌逐首补抓 LRC，不阻塞主服务。"""
+    songs = [s for s in library.list_songs() if not s["has_lyrics"]]
+    if not songs:
+        return
+    print(f"[歌词] 开始为 {len(songs)} 首歌补抓同步歌词…")
+    done = 0
+    for s in songs:
+        title, _, artist = s["name"].rpartition("-")
+        if not title:
+            title, artist = s["name"], ""
+        lrc = lyrics.fetch(title.strip(), artist.strip())
+        if lrc:
+            lyrics.save(s["id"], lrc)
+            done += 1
+            print(f"[歌词] ✓ {s['name']}")
+            # 如果正好在播这首，刷新内存歌词
+            if STATE["song_id"] == s["id"]:
+                STATE["lyrics"] = lyrics.parse(lrc)
+        else:
+            print(f"[歌词] - {s['name']}（未找到同步歌词）")
+    print(f"[歌词] 补抓完成，成功 {done}/{len(songs)} 首")
+
+
 def serve(initial=None, port: int = 8765, open_browser: bool = True):
     """启动 web 服务。initial = {name, vocals, no_vocals} 时预载一首。"""
     n = library.sync_instrumentals()  # 把已有伴奏汇总到 伴奏/ 文件夹
     print(f"伴奏已汇总到 {INSTRUMENTALS_DIR}（共 {n} 首）")
+    threading.Thread(target=_backfill_lyrics, daemon=True, name="lyrics-backfill").start()
     if initial is not None:
         _load_song(initial)
     app = build_app()

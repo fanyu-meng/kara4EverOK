@@ -6,3 +6,4 @@ torchcodec
 soundfile
 sounddevice
 numpy
+syncedlyrics

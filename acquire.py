@@ -250,7 +250,7 @@ _SPOTDL_BOOT = (
 def _spotify_id(url: str):
     """从各种 Spotify URL/URI 里解析出 (类型, id)。
     支持 open.spotify.com/[intl-xx/]{playlist|album|track}/{id} 与 spotify:...:。"""
-    m = re.search(r"(?:open\.spotify\.com/(?:intl-[\w-]+/)?|spotify:)"
+    m = re.search(r"(?:open\.spotify\.com/(?:embed/)?(?:intl-[\w-]+/)?|spotify:)"
                   r"(playlist|album|track)[:/]([A-Za-z0-9]+)", url)
     if not m:
         return None, None

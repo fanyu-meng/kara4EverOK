@@ -1,0 +1,7 @@
+yt-dlp
+spotdl
+demucs
+torchcodec
+soundfile
+sounddevice
+numpy

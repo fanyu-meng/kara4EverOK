@@ -247,16 +247,6 @@ def _download_spotify(url: str) -> str:
     return os.path.abspath(max(new_files, key=os.path.getmtime))
 
 
-# 子进程引导代码：先强制 IPv4（否则子进程会复现 ~120s IPv6 冷启动而超时），
-# 再以 `python -m spotdl` 的方式运行 spotdl。
-_SPOTDL_BOOT = (
-    "import socket;_o=socket.getaddrinfo;"
-    "socket.getaddrinfo=lambda *a,**k:[r for r in _o(*a,**k) if r[0]==socket.AF_INET] or _o(*a,**k);"
-    "import runpy,sys;sys.argv=['spotdl','save',{url!r},'--save-file',{tmp!r}];"
-    "runpy.run_module('spotdl',run_name='__main__')"
-)
-
-
 def _spotify_id(url: str):
     """从各种 Spotify URL/URI 里解析出 (类型, id)。
     支持 open.spotify.com/[intl-xx/]{playlist|album|track}/{id} 与 spotify:...:。"""
@@ -314,47 +304,17 @@ def _list_spotify_embed(url: str):
     return out
 
 
-def _list_spotify_spotdl(url: str):
-    """退路：用 spotdl save 导出歌单元数据(JSON)解析。
-    依赖 spotapi 取 token，Spotify 反爬一升级就会坏，仅作兜底。"""
-    import json
-    import tempfile
-
-    fd, tmp = tempfile.mkstemp(suffix=".spotdl")
-    os.close(fd)
-    try:
-        boot = _SPOTDL_BOOT.format(url=url, tmp=tmp)
-        subprocess.run(
-            [sys.executable, "-c", boot],
-            check=True, capture_output=True, text=True, timeout=180)
-        with open(tmp, encoding="utf-8") as f:
-            songs = json.load(f)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-
-    out = []
-    for s in songs:
-        name = s.get("name") or ""
-        artists = s.get("artists")
-        if isinstance(artists, list):
-            artist = ", ".join(a for a in artists if a)
-        else:
-            artist = s.get("artist") or ""
-        q = f"{name} {artist}".strip()
-        if q:
-            out.append({"title": q, "query": q})
-    return out
-
-
 def _list_spotify(url: str):
     """枚举 Spotify 歌单/专辑曲目，返回 [{title, query}]。
-    首选公开 embed 页(无需 token)；失败再退回 spotdl save。"""
+    只用公开 embed 页(无需 token/登录)。不再退回 spotdl——它依赖的
+    spotapi 取 token 已被 Spotify 反爬反复打挂，只会产生误导性报错。"""
     try:
         return _list_spotify_embed(url)
     except Exception as e:  # noqa: BLE001
-        print(f"Spotify embed 解析失败（{e}），改用 spotdl 兜底…")
-        return _list_spotify_spotdl(url)
+        raise RuntimeError(
+            f"无法读取该 Spotify 歌单：{e}。"
+            "请确认它是公开的歌单/专辑链接；私密歌单需要登录，无法解析。"
+        ) from e
 
 
 def list_playlist(url: str):

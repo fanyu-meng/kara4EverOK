@@ -36,7 +36,8 @@ import lyrics
 
 DEVICE = "mps"
 
-STATE = {"player": None, "song": None, "song_id": None, "lyrics": [], "device": None}
+STATE = {"player": None, "song": None, "song_id": None, "lyrics": [],
+         "device": None, "queue": []}  # queue 元素: {"id", "name"}
 JOBS = {}
 BATCHES = {}
 
@@ -53,6 +54,56 @@ def _load_song(song):
     STATE["song"] = song["name"]
     STATE["song_id"] = song["id"]
     STATE["lyrics"] = lyrics.parse(lyrics.load(song["id"]) or "")
+
+
+# ---------------- 点歌队列 ----------------
+def _play_song_id(song_id) -> bool:
+    """按 id 立即载入并播放某首；找不到返回 False。"""
+    song = library.get_song(song_id)
+    if not song:
+        return False
+    _load_song(song)
+    return True
+
+
+def _enqueue(song_id) -> dict:
+    """排队：空闲（无歌/当前已放完）则立即开唱，否则排到队尾。"""
+    song = library.get_song(song_id)
+    if not song:
+        return {"ok": False}
+    p = STATE["player"]
+    idle = p is None or p.done.is_set()
+    if idle:
+        _play_song_id(song_id)
+        return {"ok": True, "started": True}
+    STATE["queue"].append({"id": song_id, "name": song["name"]})
+    return {"ok": True, "started": False}
+
+
+def _advance() -> bool:
+    """连播下一首：取队首播放并返回 True；遇到失效的歌则跳过继续，队列空返回 False。"""
+    while STATE["queue"]:
+        nxt = STATE["queue"].pop(0)
+        if _play_song_id(nxt["id"]):
+            return True
+    return False
+
+
+def _playback_watcher():
+    """后台线程：当前歌放完且队列有歌时，自动连播下一首。"""
+    import time
+    while True:
+        p = STATE["player"]
+        if p is None:
+            time.sleep(0.3)
+            continue
+        if not p.done.wait(timeout=0.5):
+            continue                       # 还没放完，继续等
+        if STATE["player"] is p and not getattr(p, "_ended", False):
+            p._ended = True                # 防止队列为空时重复触发/忙等
+            _advance()
+        else:
+            time.sleep(0.3)
 
 
 class _Cancelled(Exception):
@@ -237,6 +288,10 @@ class DownloadReq(BaseModel):
     artist: str = ""
 
 
+class QueueIndexReq(BaseModel):
+    index: int
+
+
 # ---------------- 应用 ----------------
 def build_app():
     app = FastAPI()
@@ -259,11 +314,47 @@ def build_app():
         _load_song(song)
         return {"ok": True, "song": song["name"]}
 
+    @app.post("/queue/add")
+    def queue_add(req: LoadReq):
+        r = _enqueue(req.id)
+        if not r["ok"]:
+            return JSONResponse({"error": "找不到该歌曲"}, status_code=404)
+        return r
+
+    @app.post("/queue/play_now")
+    def queue_play_now(req: LoadReq):
+        if not _play_song_id(req.id):
+            return JSONResponse({"error": "找不到该歌曲"}, status_code=404)
+        return {"ok": True}
+
+    @app.post("/queue/remove")
+    def queue_remove(req: QueueIndexReq):
+        if 0 <= req.index < len(STATE["queue"]):
+            STATE["queue"].pop(req.index)
+        return {"ok": True, "queue": STATE["queue"]}
+
+    @app.post("/queue/prioritize")
+    def queue_prioritize(req: QueueIndexReq):
+        if 0 <= req.index < len(STATE["queue"]):
+            STATE["queue"].insert(0, STATE["queue"].pop(req.index))
+        return {"ok": True, "queue": STATE["queue"]}
+
+    @app.post("/queue/next")
+    def queue_next():
+        if not _advance():           # 队列空：停掉当前，回到无歌状态
+            p = STATE["player"]
+            if p is not None:
+                p.stop()
+            STATE["player"] = None
+            STATE["song"] = STATE["song_id"] = None
+            STATE["lyrics"] = []
+        return {"ok": True, "queue": STATE["queue"]}
+
     @app.get("/status")
     def status():
         p = STATE["player"]
         if p is None:
-            return {"has_song": False}
+            return {"has_song": False, "queue": STATE["queue"]}
         with p.lock:
             pos, total, mode, paused = p.pos, p.total, p.mode, p.paused
         return {
@@ -275,6 +366,7 @@ def build_app():
             "pos_sec": pos / p.samplerate,
             "total_sec": total / p.samplerate,
             "has_lyrics": bool(STATE["lyrics"]),
+            "queue": STATE["queue"],
         }
 
     @app.post("/toggle")
@@ -483,6 +575,18 @@ PAGE = """<!doctype html>
   .libitem .stemdl { flex:none; font-size:11px; color:var(--mut); text-decoration:none;
                      padding:3px 6px; border:1px solid var(--line); border-radius:6px; }
   .libitem .stemdl:hover { color:#fff; border-color:var(--blue); }
+  .libitem .pn { flex:none; font-size:12px; color:var(--mut); cursor:pointer;
+                 padding:3px 6px; border:1px solid var(--line); border-radius:6px; background:none; }
+  .libitem .pn:hover { color:#fff; border-color:var(--pink); }
+  .queue { overflow:auto; flex:none; max-height:26vh; }
+  #queuehd #qcount { color:var(--mut); font-weight:400; }
+  .qitem { display:flex; align-items:center; gap:8px; padding:8px 12px 8px 16px;
+           border-bottom:1px solid var(--line); font-size:13px; }
+  .qitem .qn { flex:none; width:18px; color:var(--mut); text-align:right; }
+  .qitem .qt { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .qitem .qb { flex:none; cursor:pointer; background:none; border:none; color:var(--mut);
+               font-size:14px; padding:2px 4px; }
+  .qitem .qb:hover { color:#fff; }
   .main { flex:1; display:flex; flex-direction:column; align-items:center;
           justify-content:center; gap:26px; padding:30px; }
   .song { font-size:26px; font-weight:600; text-align:center; min-height:32px; }
@@ -540,6 +644,8 @@ PAGE = """<!doctype html>
     <div id="results" class="results"></div>
     <h2>我的歌库</h2>
     <div id="lib" class="lib"></div>
+    <h2 id="queuehd" style="display:none">🎵 待唱队列 <span id="qcount"></span></h2>
+    <div id="queue" class="queue"></div>
   </div>
   <div class="main">
     <div id="song" class="song empty">从右边歌库选一首，或上方搜索下载</div>
@@ -551,6 +657,7 @@ PAGE = """<!doctype html>
     <div class="controls">
       <button id="play" onclick="togglePause()" disabled>▶ 播放</button>
       <button id="vocal" class="instrumental" onclick="toggleVocal()" disabled>🎵 伴奏</button>
+      <button id="skip" onclick="skipNext()" disabled title="跳到队列下一首">⏭ 下一首</button>
     </div>
     <div class="devrow">
       <span>🔊 输出</span>
@@ -586,15 +693,18 @@ async function loadLibrary(){
     d.className = 'libitem' + (s.id===activeId?' active':'');
     const name = document.createElement('span');
     name.className = 'ln'; name.textContent = (s.has_lyrics ? '🎤 ' : '') + s.name;
-    name.title = s.name + (s.has_lyrics ? '（含歌词）' : '');
-    name.onclick = () => loadSong(s.id);
+    name.title = s.name + (s.has_lyrics ? '（含歌词）' : '') + ' · 点击排入队列';
+    name.onclick = () => enqueue(s.id);
+    const pn = document.createElement('button');
+    pn.className = 'pn'; pn.textContent = '▶'; pn.title = '立即播放（不进队列）';
+    pn.onclick = (e) => { e.stopPropagation(); playNow(s.id); };
     const dli = document.createElement('a');
     dli.className = 'stemdl'; dli.textContent = '⬇伴奏'; dli.title = '下载伴奏文件';
     dli.href = '/download_stem/'+s.id+'/instrumental';
     const dlv = document.createElement('a');
     dlv.className = 'stemdl'; dlv.textContent = '⬇原唱'; dlv.title = '下载原唱文件';
     dlv.href = '/download_stem/'+s.id+'/original';
-    d.append(name, dli, dlv);
+    d.append(name, pn, dli, dlv);
     el.appendChild(d);
   }
 }
@@ -604,6 +714,47 @@ async function loadSong(id){
   await fetch('/load', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id})});
   loadLibrary();
   loadLyrics();
+}
+
+const POSTJSON = (url, obj) => fetch(url, {method:'POST',
+  headers:{'Content-Type':'application/json'}, body:JSON.stringify(obj)});
+
+async function enqueue(id){
+  // 空闲时后端会立即开唱；tick() 会自动同步 activeId/歌词与队列显示
+  await POSTJSON('/queue/add', {id});
+}
+async function playNow(id){
+  activeId = id;
+  await POSTJSON('/queue/play_now', {id});
+  loadLibrary(); loadLyrics();
+}
+async function skipNext(){ await fetch('/queue/next', {method:'POST'}); loadLyrics(); }
+async function queueRemove(i){ await POSTJSON('/queue/remove', {index:i}); }
+async function queuePrioritize(i){ await POSTJSON('/queue/prioritize', {index:i}); }
+
+let lastQueueKey = '';
+function renderQueue(queue){
+  queue = queue || [];
+  const key = queue.map(q=>q.id).join('|');
+  if(key === lastQueueKey) return;   // 没变就不重绘，避免闪烁
+  lastQueueKey = key;
+  const hd = document.getElementById('queuehd');
+  const box = document.getElementById('queue');
+  document.getElementById('qcount').textContent = queue.length ? '('+queue.length+')' : '';
+  hd.style.display = queue.length ? '' : 'none';
+  box.innerHTML = '';
+  queue.forEach((q, i) => {
+    const d = document.createElement('div');
+    d.className = 'qitem';
+    const n = document.createElement('span'); n.className='qn'; n.textContent = (i+1);
+    const t = document.createElement('span'); t.className='qt'; t.textContent = q.name; t.title = q.name;
+    const up = document.createElement('button'); up.className='qb'; up.textContent='⤴';
+    up.title='插到下一首'; up.onclick = () => queuePrioritize(i);
+    const rm = document.createElement('button'); rm.className='qb'; rm.textContent='✕';
+    rm.title='移除'; rm.onclick = () => queueRemove(i);
+    d.append(n, t, up, rm);
+    box.appendChild(d);
+  });
 }
 
 async function loadLyrics(){
@@ -714,7 +865,7 @@ function startDownload(btn, url, title, artist=''){
         btn.style.backgroundImage = `linear-gradient(90deg, var(--blue) ${p}%, transparent ${p}%)`; },
       onDone: j => { delete btn.dataset.job; btn.classList.remove('stop'); btn.disabled=true;
         btn.style.backgroundImage=''; btn.textContent='✓ 已入库';
-        loadLibrary().then(()=>{ if(j.song_id) loadSong(j.song_id); }); },
+        loadLibrary().then(()=>{ if(j.song_id) enqueue(j.song_id); }); },
       onError: j => { delete btn.dataset.job; btn.classList.remove('stop'); btn.disabled=false;
         btn.style.backgroundImage='';
         if(j.status==='cancelled'){ btn.textContent='下载'; }
@@ -806,7 +957,7 @@ async function importLocal(input){
   catch(e){ box.innerHTML='<div class="item">上传失败</div>'; return; }
   pollJob(job_id, {
     onStage: j => box.innerHTML = '<div class="item">'+stageLabel(j)+' · '+f.name+'</div>',
-    onDone: j => { box.innerHTML=''; loadLibrary().then(()=>{ if(j.song_id) loadSong(j.song_id); }); },
+    onDone: j => { box.innerHTML=''; loadLibrary().then(()=>{ if(j.song_id) enqueue(j.song_id); }); },
     onError: j => box.innerHTML='<div class="item">处理失败：'+(j.error||'')+'</div>',
   });
 }
@@ -830,24 +981,30 @@ bar.addEventListener('change', async () => {
 
 async function tick(){
   let st; try { st = await (await fetch('/status')).json(); } catch(e){ return; }
+  renderQueue(st.queue);
   const songEl = document.getElementById('song');
   const play = document.getElementById('play'), vocal = document.getElementById('vocal');
+  const skip = document.getElementById('skip');
+  const hasQueue = (st.queue && st.queue.length > 0);
   if(!st.has_song){
     songEl.textContent='从右边歌库选一首，或上方搜索下载'; songEl.className='song empty';
     play.disabled=vocal.disabled=bar.disabled=true;
+    skip.disabled = !hasQueue;
+    if(activeId){ activeId=null; loadLibrary(); }
     if(lyricLines.length){ lyricLines=[]; renderLyrics(); }
     return;
   }
   songEl.textContent='🎶 '+st.song; songEl.className='song';
   play.disabled=vocal.disabled=bar.disabled=false;
+  skip.disabled = !hasQueue;
   renderPause(st.paused); renderVocal(st.mode);
   document.getElementById('dur').textContent = fmt(st.total_sec);
   if(!seeking){
     bar.max = st.total_sec; bar.value = st.pos_sec;
     document.getElementById('cur').textContent = fmt(st.pos_sec);
   }
-  if(st.song_id && st.song_id !== activeId){  // 刷新页面/外部载入：同步并拉歌词
-    activeId = st.song_id; loadLyrics();
+  if(st.song_id && st.song_id !== activeId){  // 刷新页面/自动连播/外部载入：同步歌库高亮与歌词
+    activeId = st.song_id; loadLyrics(); loadLibrary();
   }
   highlightLyric(st.pos_sec);
 }
@@ -909,6 +1066,7 @@ def serve(initial=None, port: int = 8765, open_browser: bool = True):
     n = library.sync_instrumentals()  # 把已有伴奏汇总到 伴奏/ 文件夹
     print(f"伴奏已汇总到 {INSTRUMENTALS_DIR}（共 {n} 首）")
     threading.Thread(target=_backfill_lyrics, daemon=True, name="lyrics-backfill").start()
+    threading.Thread(target=_playback_watcher, daemon=True, name="playback-watcher").start()
     if initial is not None:
         _load_song(initial)
     app = build_app()

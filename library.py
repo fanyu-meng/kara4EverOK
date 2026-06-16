@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 import glob
 
 from separate import CACHE_DIR, MODEL, _find_stems, mirror_instrumental
@@ -58,6 +59,23 @@ def sync_instrumentals():
         if mirror_instrumental(s["no_vocals"]):
             n += 1
     return n
+
+
+def _norm_name(name: str) -> str:
+    """规范化歌名用于判重：合并空白、去首尾、忽略大小写。"""
+    return re.sub(r"\s+", " ", (name or "")).strip().lower()
+
+
+def find_by_name(name: str):
+    """按歌名(忽略大小写/多余空白)查歌库里已处理的歌，找不到返回 None。
+    供下载前判重：已有则跳过下载+分离。"""
+    target = _norm_name(name)
+    if not target:
+        return None
+    for s in list_songs():
+        if _norm_name(s["name"]) == target:
+            return s
+    return None
 
 
 def id_for_stems(no_vocals_path: str):

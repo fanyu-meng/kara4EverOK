@@ -30,7 +30,7 @@ from pydantic import BaseModel
 from player import KaraokePlayer
 from separate import separate, INSTRUMENTALS_DIR
 from acquire import (search_youtube, download_youtube, best_match_index,
-                     list_playlist, to_mp3, DOWNLOADS_DIR)
+                     list_playlist, to_mp3, predicted_name, DOWNLOADS_DIR)
 import library
 
 DEVICE = "mps"
@@ -81,6 +81,12 @@ def _run_job(job_id, url=None, local_path=None, title="", artist=""):
         if cancel.is_set():
             raise _Cancelled()
         if url:
+            existing = library.find_by_name(predicted_name(title, artist))
+            if existing:  # 歌库已有，直接复用，免下载+分离
+                job["song_id"] = existing["id"]
+                job["stage"] = "done"
+                job["status"] = "done"
+                return
             job["stage"] = "downloading"
             job["pct"] = 0
             audio = download_youtube(url, cancel=cancel, on_progress=prog,
@@ -154,18 +160,29 @@ def _run_batch(batch_id, url):
             _it["pct"] = round(p)
 
         try:
-            it["status"] = "downloading"
-            it["pct"] = 0
+            # 先定下下载地址和目标歌名；歌库已有则跳过下载+分离
             if it.get("url"):
-                audio = download_youtube(it["url"], cancel=cancel, on_progress=prog)
+                dl_url, st, sa = it["url"], "", ""
+                predicted = predicted_name(it.get("title", ""))
             else:
                 results = search_youtube(it["query"])
                 if not results:
                     raise RuntimeError("搜不到这首歌")
                 best = results[best_match_index(results)]
-                audio = download_youtube(best["url"], cancel=cancel, on_progress=prog,
-                                         song_title=best["title"],
-                                         song_artist=best.get("uploader", ""))
+                dl_url = best["url"]
+                st, sa = best["title"], best.get("uploader", "")
+                predicted = predicted_name(st, sa)
+
+            existing = library.find_by_name(predicted)
+            if existing:
+                it["song_id"] = existing["id"]
+                it["status"] = "exists"
+                continue
+
+            it["status"] = "downloading"
+            it["pct"] = 0
+            audio = download_youtube(dl_url, cancel=cancel, on_progress=prog,
+                                     song_title=st, song_artist=sa)
             if cancel.is_set():
                 it["status"] = "cancelled"
                 break
@@ -592,7 +609,7 @@ function pollJob(job_id, {onStage, onDone, onError}={}){
 }
 
 let curBatchId = null, batchTimer = null;
-const BSTAGE = {queued:'⏳', downloading:'⬇️', separating:'🎛', done:'✓', error:'✗', cancelled:'⏹'};
+const BSTAGE = {queued:'⏳', downloading:'⬇️', separating:'🎛', done:'✓', exists:'📚', error:'✗', cancelled:'⏹'};
 
 async function importPlaylist(){
   const url = document.getElementById('pl').value.trim(); if(!url) return;
@@ -608,7 +625,7 @@ async function importPlaylist(){
   batchTimer = setInterval(async () => {
     let b; try { b = await (await fetch('/batch/'+batch_id)).json(); } catch(e){ return; }
     renderBatch(b);
-    const done = b.items ? b.items.filter(it=>it.status==='done').length : 0;
+    const done = b.items ? b.items.filter(it=>it.status==='done'||it.status==='exists').length : 0;
     if(done !== lastDone){ lastDone = done; loadLibrary(); }
     if(['done','error','cancelled'].includes(b.status)){ clearInterval(batchTimer); batchTimer=null; }
   }, 1500);
@@ -618,13 +635,14 @@ function renderBatch(b){
   const box = document.getElementById('results');
   if(b.error){ box.innerHTML = '<div class="item">'+b.error+'</div>'; return; }
   if(b.stage==='enumerating'){ box.innerHTML = '<div class="item">解析歌单中…</div>'; return; }
-  const done = b.items.filter(it=>it.status==='done').length;
+  const done = b.items.filter(it=>it.status==='done'||it.status==='exists').length;
   let html = `<div class="batchhead"><span>歌单 ${done}/${b.items.length} 完成</span>`;
   if(b.status==='running') html += `<button class="dl stop" onclick="cancelBatch()">■ 停止全部</button>`;
   html += `</div>`;
   b.items.forEach((it,i) => {
     const active = (it.status==='downloading' || it.status==='separating');
-    const det = active ? (it.status==='downloading'?'下载':'分离') + (it.pct!=null?' '+it.pct+'%':'') : '';
+    const det = active ? (it.status==='downloading'?'下载':'分离') + (it.pct!=null?' '+it.pct+'%':'')
+              : (it.status==='exists' ? '已有' : '');
     const fill = (i===b.current && active && it.pct!=null)
       ? ` style="background:linear-gradient(90deg,#27306a ${it.pct}%, transparent ${it.pct}%)"` : '';
     html += `<div class="bitem${i===b.current?' cur':''}"${fill}><span class="bi">${BSTAGE[it.status]||''}</span>`+

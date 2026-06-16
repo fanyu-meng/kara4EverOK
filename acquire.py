@@ -59,6 +59,16 @@ def _safe_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|\x00-\x1f]', '', name).strip()
 
 
+def predicted_name(title: str, artist: str = "") -> str:
+    """预测 download_youtube 给该曲目生成的歌库名(=文件名去后缀)，用于下载前判重。
+    必须与 _download_youtube 的命名规则保持一致：有歌手则“歌名-歌手”，否则用歌名。"""
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+    if title and artist:
+        return _safe_filename(f"{title}-{artist}")
+    return _safe_filename(title)
+
+
 def _progress_hook(d):
     """yt-dlp 下载进度（沿用 download_YouTube/download_audio.py 的写法）。"""
     if d["status"] == "downloading":

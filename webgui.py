@@ -360,19 +360,19 @@ PAGE = """<!doctype html>
   body { margin:0; height:100vh; display:flex; color:var(--txt);
          font-family:-apple-system,system-ui,sans-serif; background:var(--bg); }
   .side { width:340px; flex:none; background:var(--panel); border-right:1px solid var(--line);
-          display:flex; flex-direction:column; }
+          display:flex; flex-direction:column; height:100vh; min-height:0; }
   .side h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em;
-             color:var(--mut); margin:18px 18px 8px; }
-  .searchbox { padding:12px 18px; border-bottom:1px solid var(--line); }
-  .searchbox input { width:100%; padding:11px 12px; border-radius:10px; border:1px solid var(--line);
+             color:var(--mut); margin:12px 16px 6px; }
+  .searchbox { padding:10px 16px; border-bottom:1px solid var(--line); flex:none; }
+  .searchbox input { width:100%; padding:9px 12px; border-radius:10px; border:1px solid var(--line);
                      background:#0f1124; color:var(--txt); font-size:14px; }
-  .searchbox button { margin-top:8px; width:100%; padding:10px; border:none; border-radius:10px;
+  .searchbox button { margin-top:6px; width:100%; padding:9px; border:none; border-radius:10px;
                       background:var(--blue); color:#fff; font-size:14px; cursor:pointer; }
-  .searchbox .local { background:#374151; }
-  .sep { text-align:center; color:var(--mut); font-size:11px; margin:10px 0 2px; }
+  .searchbox .local { background:#374151; padding:8px; font-size:13px; }
+  .sep { text-align:center; color:var(--mut); font-size:11px; margin:7px 0 1px; }
   .results, .lib { overflow:auto; }
-  .results { border-bottom:1px solid var(--line); max-height:42%; }
-  .lib { flex:1; }
+  .results { border-bottom:1px solid var(--line); max-height:32vh; flex:none; }
+  .lib { flex:1 1 0; min-height:140px; }
   .item { display:flex; gap:10px; align-items:center; padding:9px 14px; cursor:pointer;
           border-bottom:1px solid var(--line); }
   .item:hover { background:#22254a; }

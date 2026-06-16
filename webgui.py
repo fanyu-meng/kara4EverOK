@@ -36,7 +36,7 @@ import lyrics
 
 DEVICE = "mps"
 
-STATE = {"player": None, "song": None, "song_id": None, "lyrics": []}
+STATE = {"player": None, "song": None, "song_id": None, "lyrics": [], "device": None}
 JOBS = {}
 BATCHES = {}
 
@@ -48,7 +48,7 @@ def _load_song(song):
     if old is not None:
         old.stop()
     p = KaraokePlayer(song["vocals"], song["no_vocals"])
-    p.start()
+    p.start(device=STATE["device"])
     STATE["player"] = p
     STATE["song"] = song["name"]
     STATE["song_id"] = song["id"]
@@ -227,6 +227,10 @@ class SeekReq(BaseModel):
     seconds: float
 
 
+class DeviceReq(BaseModel):
+    device: int | None = None  # None=跟随系统默认输出
+
+
 class DownloadReq(BaseModel):
     url: str
     title: str = ""
@@ -375,6 +379,38 @@ def build_app():
         return FileResponse(path, filename=f"{song['name']} ({label}).{ext}",
                             media_type=media)
 
+    @app.get("/devices")
+    def get_devices():
+        """列出所有可用输出声卡。current=null 表示“跟随系统默认”。"""
+        import sounddevice as sd
+        try:  # 重置 PortAudio，确保拿到最新的系统设备列表与默认
+            sd._terminate()
+            sd._initialize()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            default_out = sd.default.device[1]
+        except Exception:  # noqa: BLE001
+            default_out = None
+        devs = []
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_output_channels"] > 0:
+                devs.append({"index": i, "name": d["name"],
+                             "is_system_default": i == default_out})
+        return {"devices": devs, "current": STATE["device"]}
+
+    @app.post("/device")
+    def set_device(req: DeviceReq):
+        """切换输出声卡。device=null 跟随系统默认。正在播放则无缝切换、保持进度。"""
+        STATE["device"] = req.device
+        p = STATE["player"]
+        if p is not None:
+            try:
+                p.set_device(req.device)
+            except Exception as e:  # noqa: BLE001
+                return JSONResponse({"error": f"切换声卡失败: {e}"}, status_code=500)
+        return {"ok": True, "device": req.device}
+
     @app.get("/lyrics")
     def get_lyrics():
         """当前播放歌曲的同步歌词行 [{t, text}]。"""
@@ -462,6 +498,9 @@ PAGE = """<!doctype html>
   .times { display:flex; justify-content:space-between; font-size:12px; color:var(--mut); }
   .empty { color:var(--mut); }
   .hint { font-size:13px; color:var(--mut); }
+  .devrow { display:flex; gap:8px; align-items:center; font-size:13px; color:var(--mut); }
+  .devrow select { background:#0f1124; color:var(--txt); border:1px solid var(--line);
+                   border-radius:8px; padding:6px 10px; font-size:13px; max-width:300px; cursor:pointer; }
   .lyrics { width:min(640px,90%); height:38vh; overflow-y:auto; text-align:center;
             display:flex; flex-direction:column; gap:10px; padding:8vh 0;
             mask-image:linear-gradient(transparent, #000 18%, #000 82%, transparent);
@@ -513,7 +552,10 @@ PAGE = """<!doctype html>
       <button id="play" onclick="togglePause()" disabled>▶ 播放</button>
       <button id="vocal" class="instrumental" onclick="toggleVocal()" disabled>🎵 伴奏</button>
     </div>
-    <div class="hint">声音从电脑扬声器播放</div>
+    <div class="devrow">
+      <span>🔊 输出</span>
+      <select id="dev" onchange="setDevice()"></select>
+    </div>
   </div>
 
 <script>
@@ -810,7 +852,28 @@ async function tick(){
   highlightLyric(st.pos_sec);
 }
 
+async function loadDevices(){
+  let data; try { data = await (await fetch('/devices')).json(); } catch(e){ return; }
+  const sel = document.getElementById('dev');
+  const cur = data.current;  // null = 跟随系统
+  let html = '<option value="">系统默认（跟随系统）</option>';
+  for(const d of data.devices){
+    const star = d.is_system_default ? ' ★系统' : '';
+    html += `<option value="${d.index}">${d.name}${star}</option>`;
+  }
+  sel.innerHTML = html;
+  sel.value = (cur==null) ? '' : String(cur);
+}
+
+async function setDevice(){
+  const v = document.getElementById('dev').value;
+  const device = (v==='') ? null : parseInt(v, 10);
+  await fetch('/device', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({device})});
+}
+
 loadLibrary();
+loadDevices();
 setInterval(tick, 500);
 </script>
 </body>

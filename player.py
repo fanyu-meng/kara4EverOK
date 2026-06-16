@@ -33,6 +33,7 @@ class KaraokePlayer:
         self.total = n
 
         self.pos = 0
+        self.device = None             # 输出声卡：None=系统默认
         self.mode = "instrumental"     # 'instrumental' | 'original'
         self.paused = False
         self.lock = threading.Lock()
@@ -75,14 +76,30 @@ class KaraokePlayer:
             self.pos = max(0, min(self.total - 1, int(seconds * self.samplerate)))
 
     # ---------- 供 GUI 使用的非阻塞控制 ----------
-    def start(self):
-        """打开音频流并开始播放（不阻塞，供 GUI 调用）。"""
+    def start(self, device=None):
+        """打开音频流并开始播放（不阻塞，供 GUI 调用）。
+        device: None=跟随系统默认输出；int=指定 sounddevice 设备索引。"""
+        self.device = device
         self.stream = sd.OutputStream(
             samplerate=self.samplerate,
             channels=self.channels,
+            device=device,
             callback=self._callback,
         )
         self.stream.start()
+
+    def set_device(self, device):
+        """切换输出声卡，保持当前播放进度/模式/暂停状态不变。
+        device: None=系统默认；int=设备索引。None 时先重置 PortAudio 以拿到最新系统默认。"""
+        self.stop()
+        if device is None:
+            # 重新初始化 PortAudio，使“系统默认”反映用户最新的系统设置
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception:  # noqa: BLE001
+                pass
+        self.start(device=device)
 
     def stop(self):
         """停止并关闭音频流。"""

@@ -50,6 +50,15 @@ def _is_spotify(url: str) -> bool:
     return "spotify.com" in url or url.startswith("spotify:")
 
 
+def _is_bilibili(url: str) -> bool:
+    return "bilibili.com" in url or "b23.tv" in url
+
+
+def _safe_filename(name: str) -> str:
+    """去掉文件名中不合法的字符。"""
+    return re.sub(r'[\\/*?:"<>|\x00-\x1f]', '', name).strip()
+
+
 def _progress_hook(d):
     """yt-dlp 下载进度（沿用 download_YouTube/download_audio.py 的写法）。"""
     if d["status"] == "downloading":
@@ -64,16 +73,33 @@ def _progress_hook(d):
         print("\n  下载完成，转码中…")
 
 
-def _download_youtube(url: str) -> str:
+def _download_youtube(url: str, cancel=None, on_progress=None,
+                      song_title: str = "", song_artist: str = "") -> str:
     import yt_dlp
 
     _ensure_downloads()
     outtmpl = os.path.join(DOWNLOADS_DIR, "%(title)s.%(ext)s")
+    hooks = [_progress_hook]
+    if cancel is not None:
+        def _cancel_hook(d):
+            if cancel.is_set():
+                raise KeyboardInterrupt("下载已中止")
+        hooks.append(_cancel_hook)
+    if on_progress is not None:
+        def _pct_hook(d):
+            if d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                if total:
+                    try:
+                        on_progress(d.get("downloaded_bytes", 0) / total * 100)
+                    except Exception:  # noqa: BLE001
+                        pass
+        hooks.append(_pct_hook)
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
         "noplaylist": True,
-        "progress_hooks": [_progress_hook],
+        "progress_hooks": hooks,
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -87,12 +113,19 @@ def _download_youtube(url: str) -> str:
         path = ydl.prepare_filename(info)
         base, _ = os.path.splitext(path)
         mp3 = base + ".mp3"
-        if os.path.exists(mp3):
-            return os.path.abspath(mp3)
-        # 兜底：找最近生成的同名文件
-        if os.path.exists(path):
-            return os.path.abspath(path)
-    raise RuntimeError("YouTube 下载后未找到音频文件")
+        if not os.path.exists(mp3):
+            if os.path.exists(path):
+                mp3 = os.path.abspath(path)
+            else:
+                raise RuntimeError("YouTube 下载后未找到音频文件")
+        mp3 = os.path.abspath(mp3)
+    if song_title and song_artist:
+        safe_name = _safe_filename(f"{song_title}-{song_artist}") + ".mp3"
+        dest = os.path.join(DOWNLOADS_DIR, safe_name)
+        if os.path.abspath(dest) != mp3:
+            os.replace(mp3, dest)
+        mp3 = dest
+    return mp3
 
 
 # 公开别名，供 webgui 后台任务调用
@@ -161,6 +194,31 @@ def search_youtube(query: str, n: int = 6):
     return results
 
 
+# 标题里出现这些词通常不是“原版录音室版本”，自动选歌时降权
+_BAD_WORDS = [
+    "live", "cover", "karaoke", "instrumental", "remix", "sped", "slow",
+    "nightcore", "8d", "reverb", "mashup", "medley", "acoustic", "piano",
+    "现场", "翻唱", "伴奏", "纯音乐", "remastered live",
+]
+
+
+def best_match_index(results) -> int:
+    """从搜索候选里挑“最可能是这首歌原版”的一个，返回下标。
+    规则：靠前(相关度高)加分；标题含 live/cover/remix 等降权；时长过短/过长降权。"""
+    best_i, best_score = 0, float("-inf")
+    for i, r in enumerate(results):
+        title = (r.get("title") or "").lower()
+        score = -i * 0.5  # 越靠前越好
+        if any(w in title for w in _BAD_WORDS):
+            score -= 5
+        d = r.get("duration") or 0
+        if d and (d < 60 or d > 360):  # 典型歌曲 1~6 分钟之外降权
+            score -= 2
+        if score > best_score:
+            best_score, best_i = score, i
+    return best_i
+
+
 def _download_spotify(url: str) -> str:
     """用 spotdl 下载 Spotify 单曲（底层走 YouTube Music 匹配）。"""
     _ensure_downloads()
@@ -168,7 +226,7 @@ def _download_spotify(url: str) -> str:
     print(f"从 Spotify（经 spotdl）下载: {url}")
     cmd = [
         sys.executable, "-m", "spotdl", "download", url,
-        "--output", os.path.join(DOWNLOADS_DIR, "{title} - {artist}.{output-ext}"),
+        "--output", os.path.join(DOWNLOADS_DIR, "{title}-{artist}.{output-ext}"),
     ]
     subprocess.run(cmd, check=True)
     after = set(glob.glob(os.path.join(DOWNLOADS_DIR, "*")))
@@ -177,6 +235,92 @@ def _download_spotify(url: str) -> str:
     if not new_files:
         raise RuntimeError("spotdl 未产出新音频文件（可能是歌单或下载失败）")
     return os.path.abspath(max(new_files, key=os.path.getmtime))
+
+
+# 子进程引导代码：先强制 IPv4（否则子进程会复现 ~120s IPv6 冷启动而超时），
+# 再以 `python -m spotdl` 的方式运行 spotdl。
+_SPOTDL_BOOT = (
+    "import socket;_o=socket.getaddrinfo;"
+    "socket.getaddrinfo=lambda *a,**k:[r for r in _o(*a,**k) if r[0]==socket.AF_INET] or _o(*a,**k);"
+    "import runpy,sys;sys.argv=['spotdl','save',{url!r},'--save-file',{tmp!r}];"
+    "runpy.run_module('spotdl',run_name='__main__')"
+)
+
+
+def _list_spotify(url: str):
+    """用 spotdl save 把歌单元数据导出为 .spotdl(JSON)，解析出每首歌名+歌手。
+    返回 [{title, query}]，之后按 query 走 YouTube Music 搜索下载。"""
+    import json
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(suffix=".spotdl")
+    os.close(fd)
+    try:
+        boot = _SPOTDL_BOOT.format(url=url, tmp=tmp)
+        subprocess.run(
+            [sys.executable, "-c", boot],
+            check=True, capture_output=True, text=True, timeout=180)
+        with open(tmp, encoding="utf-8") as f:
+            songs = json.load(f)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+    out = []
+    for s in songs:
+        name = s.get("name") or ""
+        artists = s.get("artists")
+        if isinstance(artists, list):
+            artist = ", ".join(a for a in artists if a)
+        else:
+            artist = s.get("artist") or ""
+        q = f"{name} {artist}".strip()
+        if q:
+            out.append({"title": q, "query": q})
+    return out
+
+
+def list_playlist(url: str):
+    """枚举歌单/列表里的每首曲目。
+    Spotify → [{title, query}]（按名字搜 YouTube）；
+    YouTube/Bilibili 等 → [{title, url}]（直接用链接下载）。"""
+    if _is_spotify(url):
+        return _list_spotify(url)
+
+    import yt_dlp
+    opts = {"quiet": True, "no_warnings": True,
+            "extract_flat": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    entries = info.get("entries")
+    if not entries:  # 不是列表，当单曲处理
+        entries = [info]
+    out = []
+    for e in entries:
+        if not e:
+            continue
+        vid = e.get("id")
+        u = e.get("url") or e.get("webpage_url") or (
+            f"https://www.youtube.com/watch?v={vid}" if vid else None)
+        if not u:
+            continue
+        out.append({"title": e.get("title") or "(未知)", "url": u})
+    return out
+
+
+def to_mp3(path: str, bitrate: str = "320k") -> str:
+    """把任意音频转成 320k mp3（已是 mp3 则原样返回）。转好后删掉原文件。"""
+    if path.lower().endswith(".mp3"):
+        return path
+    out = os.path.splitext(path)[0] + ".mp3"
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", path, "-vn", "-b:a", bitrate, out],
+        check=True, capture_output=True)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return out
 
 
 def acquire(source: str) -> str:

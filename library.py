@@ -6,7 +6,7 @@
 import os
 import glob
 
-from separate import CACHE_DIR, MODEL, _find_stems
+from separate import CACHE_DIR, MODEL, _find_stems, mirror_instrumental
 
 
 def list_songs():
@@ -49,6 +49,15 @@ def get_song(song_id: str):
         "vocals": vocals,
         "no_vocals": no_vocals,
     }
+
+
+def sync_instrumentals():
+    """把歌库里所有伴奏汇总到统一的 伴奏/ 文件夹（缺的补上）。返回处理数量。"""
+    n = 0
+    for s in list_songs():
+        if mirror_instrumental(s["no_vocals"]):
+            n += 1
+    return n
 
 
 def id_for_stems(no_vocals_path: str):

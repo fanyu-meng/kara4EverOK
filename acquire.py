@@ -247,9 +247,66 @@ _SPOTDL_BOOT = (
 )
 
 
-def _list_spotify(url: str):
-    """用 spotdl save 把歌单元数据导出为 .spotdl(JSON)，解析出每首歌名+歌手。
-    返回 [{title, query}]，之后按 query 走 YouTube Music 搜索下载。"""
+def _spotify_id(url: str):
+    """从各种 Spotify URL/URI 里解析出 (类型, id)。
+    支持 open.spotify.com/[intl-xx/]{playlist|album|track}/{id} 与 spotify:...:。"""
+    m = re.search(r"(?:open\.spotify\.com/(?:intl-[\w-]+/)?|spotify:)"
+                  r"(playlist|album|track)[:/]([A-Za-z0-9]+)", url)
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+def _find_track_list(o):
+    """在 embed 的 __NEXT_DATA__ JSON 里递归找 trackList。"""
+    if isinstance(o, dict):
+        if isinstance(o.get("trackList"), list):
+            return o["trackList"]
+        for v in o.values():
+            r = _find_track_list(v)
+            if r:
+                return r
+    elif isinstance(o, list):
+        for v in o:
+            r = _find_track_list(v)
+            if r:
+                return r
+    return None
+
+
+def _list_spotify_embed(url: str):
+    """用 Spotify 公开 embed 页枚举曲目（无需登录/token，快且稳）。
+    embed 页内嵌 __NEXT_DATA__(JSON)，含 trackList[{title, subtitle(歌手)}]。
+    返回 [{title, query}]。注意：超大歌单(几百首)embed 可能只给前一部分。"""
+    import json
+    import urllib.request
+
+    typ, pid = _spotify_id(url)
+    if not pid:
+        raise RuntimeError("无法识别的 Spotify 链接")
+    embed = f"https://open.spotify.com/embed/{typ}/{pid}"
+    req = urllib.request.Request(embed, headers={"User-Agent": "Mozilla/5.0"})
+    html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        raise RuntimeError("Spotify embed 页结构变化，未找到曲目数据")
+    tracks = _find_track_list(json.loads(m.group(1)))
+    if not tracks:
+        raise RuntimeError("embed 页未含曲目（歌单可能为空/私密）")
+
+    out = []
+    for t in tracks:
+        title = (t.get("title") or "").strip()
+        artist = (t.get("subtitle") or "").strip()
+        q = f"{title} {artist}".strip()
+        if q:
+            out.append({"title": q, "query": q})
+    return out
+
+
+def _list_spotify_spotdl(url: str):
+    """退路：用 spotdl save 导出歌单元数据(JSON)解析。
+    依赖 spotapi 取 token，Spotify 反爬一升级就会坏，仅作兜底。"""
     import json
     import tempfile
 
@@ -278,6 +335,16 @@ def _list_spotify(url: str):
         if q:
             out.append({"title": q, "query": q})
     return out
+
+
+def _list_spotify(url: str):
+    """枚举 Spotify 歌单/专辑曲目，返回 [{title, query}]。
+    首选公开 embed 页(无需 token)；失败再退回 spotdl save。"""
+    try:
+        return _list_spotify_embed(url)
+    except Exception as e:  # noqa: BLE001
+        print(f"Spotify embed 解析失败（{e}），改用 spotdl 兜底…")
+        return _list_spotify_spotdl(url)
 
 
 def list_playlist(url: str):

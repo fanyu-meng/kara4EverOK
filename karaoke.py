@@ -20,16 +20,26 @@ def main():
     parser = argparse.ArgumentParser(
         description="本地卡拉OK：去人声 + 原唱/伴奏切换",
     )
-    parser.add_argument("source",
-                        help="本地音频文件路径 / YouTube 链接 / Spotify 链接")
+    parser.add_argument("source", nargs="?", default=None,
+                        help="本地音频文件路径 / YouTube 链接 / Spotify 链接"
+                             "（用 --gui 时可省略，直接打开应用搜索/选库）")
     parser.add_argument("--device", default="mps",
                         choices=["mps", "cpu", "cuda"],
                         help="Demucs 运行设备（默认 mps，Apple Silicon）")
     parser.add_argument("--no-cache", action="store_true",
                         help="忽略缓存，强制重新分离")
     parser.add_argument("--gui", action="store_true",
-                        help="用网页 GUI（歌名 + 切换按钮）代替命令行播放")
+                        help="用网页 GUI（歌库/搜索/下载/播放控制）代替命令行播放")
     args = parser.parse_args()
+
+    # GUI 且无 source：直接打开应用，在浏览器里搜索/选库
+    if args.gui and not args.source:
+        from webgui import serve
+        serve()
+        return
+
+    if not args.source:
+        parser.error("需要提供歌曲来源（或用 --gui 打开应用）")
 
     print("=== 1/3 获取音频 ===")
     audio = acquire(args.source)

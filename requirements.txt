@@ -1,4 +1,5 @@
 yt-dlp
+ytmusicapi
 spotdl
 demucs
 torchcodec

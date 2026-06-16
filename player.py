@@ -69,6 +69,11 @@ class KaraokePlayer:
             delta = int(seconds * self.samplerate)
             self.pos = max(0, min(self.total - 1, self.pos + delta))
 
+    def seek_to(self, seconds: float):
+        """跳到绝对时间点（秒）——供进度条拖动用。"""
+        with self.lock:
+            self.pos = max(0, min(self.total - 1, int(seconds * self.samplerate)))
+
     # ---------- 供 GUI 使用的非阻塞控制 ----------
     def start(self):
         """打开音频流并开始播放（不阻塞，供 GUI 调用）。"""

@@ -8,9 +8,30 @@ import os
 import re
 import sys
 import glob
+import socket
 import subprocess
 
 DOWNLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
+
+
+def _force_ipv4():
+    """强制 IPv4：本机 IPv6 不通时，首个外连会在 IPv6 上等约 120s 才回退，
+    导致搜索/下载冷启动巨慢。过滤掉 getaddrinfo 的 IPv6 结果即可彻底避免。
+    仅在仍有 IPv4 地址时过滤，避免误伤 IPv6-only 主机。"""
+    if getattr(socket, "_ipv4_forced", False):
+        return
+    _orig = socket.getaddrinfo
+
+    def ipv4_only(*args, **kwargs):
+        res = _orig(*args, **kwargs)
+        v4 = [r for r in res if r[0] == socket.AF_INET]
+        return v4 or res
+
+    socket.getaddrinfo = ipv4_only
+    socket._ipv4_forced = True
+
+
+_force_ipv4()
 
 
 def _ensure_downloads():
@@ -72,6 +93,72 @@ def _download_youtube(url: str) -> str:
         if os.path.exists(path):
             return os.path.abspath(path)
     raise RuntimeError("YouTube 下载后未找到音频文件")
+
+
+# 公开别名，供 webgui 后台任务调用
+download_youtube = _download_youtube
+
+
+_ytmusic = None
+
+
+def _get_ytmusic():
+    global _ytmusic
+    if _ytmusic is None:
+        from ytmusicapi import YTMusic
+        _ytmusic = YTMusic()
+    return _ytmusic
+
+
+def _dur_to_seconds(s):
+    """'3:01' / '1:02:03' → 秒；已是数字则原样返回。"""
+    if s is None:
+        return None
+    if isinstance(s, (int, float)):
+        return int(s)
+    parts = str(s).split(":")
+    try:
+        sec = 0
+        for p in parts:
+            sec = sec * 60 + int(p)
+        return sec
+    except ValueError:
+        return None
+
+
+def search_youtube(query: str, n: int = 6):
+    """在 YouTube Music 搜索，返回 n 个候选（不下载），供用户确认。
+
+    用 ytmusicapi（直连 YouTube Music 内部 API）：比 yt-dlp 抓取快得多（<1s），
+    且结果干净（歌名 / 歌手 分开），更适合卡拉OK挑歌。
+    返回 [{id, title, uploader, duration, url, thumbnail}]。
+    """
+    yt = _get_ytmusic()
+    try:
+        res = yt.search(query, filter="songs", limit=n)
+    except Exception:
+        res = yt.search(query, filter="videos", limit=n)  # 兜底
+
+    results = []
+    for r in res:
+        vid = r.get("videoId")
+        if not vid:
+            continue
+        artists = ", ".join(a.get("name", "") for a in r.get("artists", []) if a.get("name"))
+        thumbs = r.get("thumbnails") or []
+        thumb = thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+        dur = r.get("duration_seconds") or _dur_to_seconds(r.get("duration"))
+        results.append({
+            "id": vid,
+            "title": r.get("title") or "(无标题)",
+            "uploader": artists,
+            "duration": dur,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "thumbnail": thumb,
+        })
+        if len(results) >= n:
+            break
+    return results
 
 
 def _download_spotify(url: str) -> str:

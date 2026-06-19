@@ -563,6 +563,11 @@ PAGE = """<!doctype html>
   .tab.active { color:var(--txt); border-bottom-color:var(--blue); }
   .tab .cnt { font-weight:400; text-transform:none; color:var(--mut); }
   .tabpane { flex:1 1 0; min-height:0; overflow:auto; }
+  .libwrap { display:flex; flex-direction:column; flex:1 1 0; min-height:0; }
+  .libfilter { flex:none; padding:8px 12px 9px; border-bottom:1px solid var(--line); }
+  .libfilter input { width:100%; padding:7px 12px; border-radius:8px; border:1px solid var(--line);
+                     background:#0f1124; color:var(--txt); font-size:13px; }
+  .libfilter input::placeholder { color:var(--mut); }
   .searchbox { padding:10px 16px; flex:none; }
   .searchbox input { width:100%; padding:9px 12px; border-radius:10px; border:1px solid var(--line);
                      background:#0f1124; color:var(--txt); font-size:14px; }
@@ -670,7 +675,12 @@ PAGE = """<!doctype html>
         <button class="tab active" id="tab-lib"   onclick="switchTab('lib')">🎤 我的歌库 <span id="libcount" class="cnt"></span></button>
         <button class="tab"        id="tab-queue" onclick="switchTab('queue')">🎵 待唱队列 <span id="qcount" class="cnt"></span></button>
       </div>
-      <div id="lib"   class="lib tabpane"></div>
+      <div id="libwrap" class="libwrap">
+        <div class="libfilter">
+          <input id="libq" type="search" placeholder="🔍 筛选歌库（歌名 / 歌手）" oninput="renderLibrary()">
+        </div>
+        <div id="lib" class="lib tabpane"></div>
+      </div>
       <div id="queue" class="queue tabpane" style="display:none"></div>
     </div>
   </div>
@@ -714,8 +724,8 @@ function isYouTubeUrl(s){
 
 function switchTab(name){
   const isLib = name === 'lib';
-  document.getElementById('lib').style.display   = isLib ? '' : 'none';
-  document.getElementById('queue').style.display = isLib ? 'none' : '';
+  document.getElementById('libwrap').style.display = isLib ? '' : 'none';
+  document.getElementById('queue').style.display   = isLib ? 'none' : '';
   document.getElementById('tab-lib').classList.toggle('active', isLib);
   document.getElementById('tab-queue').classList.toggle('active', !isLib);
   localStorage.setItem('activeTab', name);
@@ -761,12 +771,25 @@ function restoreUI(){
   initResizer();
 }
 
+let librarySongs = [];   // 最近一次 /library 的结果，供筛选用
+
 async function loadLibrary(){
-  const songs = await (await fetch('/library')).json();
-  document.getElementById('libcount').textContent = songs.length ? '('+songs.length+')' : '';
+  librarySongs = await (await fetch('/library')).json();
+  renderLibrary();
+}
+
+function renderLibrary(){
+  const songs = librarySongs;
+  const q = document.getElementById('libq').value.trim().toLowerCase();
+  const shown = q ? songs.filter(s => s.name.toLowerCase().includes(q)) : songs;
+  document.getElementById('libcount').textContent =
+    (q && shown.length !== songs.length) ? '('+shown.length+'/'+songs.length+')'
+                                         : (songs.length ? '('+songs.length+')' : '');
   const el = document.getElementById('lib');
-  el.innerHTML = songs.length ? '' : '<div class="libitem empty">还没有处理过的歌</div>';
-  for(const s of songs){
+  if(!songs.length){ el.innerHTML = '<div class="libitem empty">还没有处理过的歌</div>'; return; }
+  if(!shown.length){ el.innerHTML = '<div class="libitem empty">没有匹配的歌</div>'; return; }
+  el.innerHTML = '';
+  for(const s of shown){
     const d = document.createElement('div');
     d.className = 'libitem' + (s.id===activeId?' active':'');
     const name = document.createElement('span');

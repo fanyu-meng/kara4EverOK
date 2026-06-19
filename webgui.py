@@ -40,6 +40,7 @@ STATE = {"player": None, "song": None, "song_id": None, "lyrics": [],
          "device": None, "queue": []}  # queue 元素: {"id", "name"}
 JOBS = {}
 BATCHES = {}
+BATCH_LOCK = threading.Lock()  # 串行化“追加歌单 / 处理线程收尾”的判定
 
 
 # ---------------- 播放控制辅助 ----------------
@@ -178,14 +179,24 @@ def _new_batch():
     bid = uuid.uuid4().hex[:12]
     BATCHES[bid] = {"status": "running", "stage": "enumerating",
                     "cancel": threading.Event(), "items": [],
-                    "current": -1, "error": None}
+                    "current": -1, "error": None,
+                    "enum_active": 0, "sources": 0}  # enum_active: 正在解析的歌单数
     return bid
+
+
+def _active_batch():
+    """返回当前仍在运行的批次 (b, bid)，没有则 (None, None)。调用方需持有 BATCH_LOCK。"""
+    for bid, b in BATCHES.items():
+        if b["status"] == "running":
+            return b, bid
+    return None, None
 
 
 def _batch_view(b):
     return {
         "status": b["status"], "stage": b["stage"], "current": b["current"],
-        "error": b["error"],
+        "error": b["error"], "enumerating": b["enum_active"],
+        "sources": b["sources"],
         "items": [{"title": it["title"], "status": it["status"],
                    "song_id": it.get("song_id"), "error": it.get("error"),
                    "pct": it.get("pct")}
@@ -193,75 +204,98 @@ def _batch_view(b):
     }
 
 
-def _run_batch(batch_id, url):
+def _enumerate_into(batch_id, url):
+    """后台解析一个歌单，把曲目追加到批次队列尾部。可与处理线程、其它解析并发。
+    注意：enum_active 已由 import_playlist 在锁内先行 +1，这里只负责收尾 -1。"""
     b = BATCHES[batch_id]
-    cancel = b["cancel"]
     try:
         tracks = list_playlist(url)
+        err = None
     except Exception as e:  # noqa: BLE001
-        b["status"] = "error"
-        b["error"] = "解析歌单失败: " + str(e)
-        b["stage"] = "done"
-        return
-    if not tracks:
-        b["status"] = "error"
-        b["error"] = "歌单为空或无法解析"
-        b["stage"] = "done"
-        return
+        tracks, err = None, str(e)
+    with BATCH_LOCK:
+        if tracks:
+            b["items"].extend({"title": t["title"], "status": "queued",
+                               "url": t.get("url"), "query": t.get("query")}
+                              for t in tracks)
+            b["sources"] += 1
+            if b["stage"] == "enumerating":
+                b["stage"] = "processing"
+        elif not b["items"]:
+            # 首个歌单就解析失败/为空：整批报错
+            b["error"] = err and ("解析歌单失败: " + err) or "歌单为空或无法解析"
+        b["enum_active"] -= 1
 
-    b["items"] = [{"title": t["title"], "status": "queued",
-                   "url": t.get("url"), "query": t.get("query")} for t in tracks]
-    b["stage"] = "processing"
 
-    for i, it in enumerate(b["items"]):
+def _process_item(it, cancel):
+    """处理一首：定位下载源 →（歌库已有则跳过）→ 下载 → 分离 → 入库。结果写回 it。"""
+    def prog(p):
+        it["pct"] = round(p)
+
+    try:
+        # 先定下下载地址和目标歌名；歌库已有则跳过下载+分离
+        if it.get("url"):
+            dl_url, st, sa = it["url"], "", ""
+            predicted = predicted_name(it.get("title", ""))
+        else:
+            results = search_youtube(it["query"])
+            if not results:
+                raise RuntimeError("搜不到这首歌")
+            best = results[best_match_index(results)]
+            dl_url = best["url"]
+            st, sa = best["title"], best.get("uploader", "")
+            predicted = predicted_name(st, sa)
+
+        existing = library.find_by_name(predicted)
+        if existing:
+            it["song_id"] = existing["id"]
+            it["status"] = "exists"
+            return
+
+        it["status"] = "downloading"
+        it["pct"] = 0
+        audio = download_youtube(dl_url, cancel=cancel, on_progress=prog,
+                                 song_title=st, song_artist=sa)
         if cancel.is_set():
-            break
-        b["current"] = i
-
-        def prog(p, _it=it):
-            _it["pct"] = round(p)
-
-        try:
-            # 先定下下载地址和目标歌名；歌库已有则跳过下载+分离
-            if it.get("url"):
-                dl_url, st, sa = it["url"], "", ""
-                predicted = predicted_name(it.get("title", ""))
-            else:
-                results = search_youtube(it["query"])
-                if not results:
-                    raise RuntimeError("搜不到这首歌")
-                best = results[best_match_index(results)]
-                dl_url = best["url"]
-                st, sa = best["title"], best.get("uploader", "")
-                predicted = predicted_name(st, sa)
-
-            existing = library.find_by_name(predicted)
-            if existing:
-                it["song_id"] = existing["id"]
-                it["status"] = "exists"
-                continue
-
-            it["status"] = "downloading"
-            it["pct"] = 0
-            audio = download_youtube(dl_url, cancel=cancel, on_progress=prog,
-                                     song_title=st, song_artist=sa)
-            if cancel.is_set():
-                it["status"] = "cancelled"
-                break
-            it["status"] = "separating"
-            it["pct"] = 0
-            _, no_vocals = separate(audio, device=DEVICE, use_cache=True,
-                                    cancel=cancel, on_progress=prog)
-            it["song_id"] = library.id_for_stems(no_vocals)
-            it["status"] = "done"
-        except (_Cancelled, KeyboardInterrupt):
             it["status"] = "cancelled"
-            break
-        except Exception as e:  # noqa: BLE001
-            it["status"] = "error"
-            it["error"] = str(e)
+            return
+        it["status"] = "separating"
+        it["pct"] = 0
+        _, no_vocals = separate(audio, device=DEVICE, use_cache=True,
+                                cancel=cancel, on_progress=prog)
+        it["song_id"] = library.id_for_stems(no_vocals)
+        it["status"] = "done"
+    except (_Cancelled, KeyboardInterrupt):
+        it["status"] = "cancelled"
+    except Exception as e:  # noqa: BLE001
+        it["status"] = "error"
+        it["error"] = str(e)
 
-    b["status"] = "cancelled" if cancel.is_set() else "done"
+
+def _batch_worker(batch_id):
+    """单线程顺序处理批次队列。队列空但仍有歌单在解析时等待新曲目，
+    全部解析完成且无待处理曲目后收尾——这样后续追加的歌单会自然接到队尾。"""
+    import time
+    b = BATCHES[batch_id]
+    cancel = b["cancel"]
+    i = 0
+    while not cancel.is_set():
+        with BATCH_LOCK:
+            if i < len(b["items"]):
+                it = b["items"][i]
+            elif b["enum_active"] > 0:
+                it = None                 # 还有歌单在解析，稍候再取
+            else:
+                b["status"] = "done"      # 队列已空且无歌单在解析
+                b["stage"] = "done"
+                return
+        if it is None:
+            time.sleep(0.3)
+            continue
+        b["current"] = i
+        _process_item(it, cancel)
+        i += 1
+    b["status"] = "cancelled"
     b["stage"] = "done"
 
 
@@ -439,9 +473,19 @@ def build_app():
 
     @app.post("/import_playlist")
     def import_playlist(req: PlaylistReq):
-        batch_id = _new_batch()
-        threading.Thread(target=_run_batch, daemon=True,
+        # 已有批次在跑就追加到它（沿用同一处理线程顺序消化），否则新建一个。
+        with BATCH_LOCK:
+            b, batch_id = _active_batch()
+            new_worker = b is None
+            if new_worker:
+                batch_id = _new_batch()
+                b = BATCHES[batch_id]
+            b["enum_active"] += 1   # 必须在锁内先行 +1，避免处理线程误判“全部完成”
+        threading.Thread(target=_enumerate_into, daemon=True,
                          kwargs={"batch_id": batch_id, "url": req.url}).start()
+        if new_worker:
+            threading.Thread(target=_batch_worker, daemon=True,
+                             kwargs={"batch_id": batch_id}).start()
         return {"batch_id": batch_id}
 
     @app.get("/batch/{batch_id}")
@@ -663,7 +707,7 @@ PAGE = """<!doctype html>
           <input id="file" type="file" accept="audio/*" style="display:none" onchange="importLocal(this)">
           <button class="local" onclick="document.getElementById('file').click()">📁 选择本地文件分离</button>
           <div class="sep">— 或 整个歌单 —</div>
-          <input id="pl" placeholder="粘贴 Spotify / YouTube / Bilibili 歌单链接"
+          <input id="pl" placeholder="歌单链接（Spotify / YouTube / Bilibili，可连续添加接到队尾）"
                  onkeydown="if(event.key==='Enter')importPlaylist()">
           <button class="local" onclick="importPlaylist()">📜 导入整个歌单</button>
         </div>
@@ -1002,15 +1046,18 @@ let curBatchId = null, batchTimer = null;
 const BSTAGE = {queued:'⏳', downloading:'⬇️', separating:'🎛', done:'✓', exists:'📚', error:'✗', cancelled:'⏹'};
 
 async function importPlaylist(){
-  const url = document.getElementById('pl').value.trim(); if(!url) return;
+  const input = document.getElementById('pl');
+  const url = input.value.trim(); if(!url) return;
+  input.value = '';   // 清空输入框，方便正在导入时继续粘贴下一个歌单
   const box = document.getElementById('results');
-  box.innerHTML = '<div class="item">解析歌单中…</div>';
   let batch_id;
   try { ({batch_id} = await (await fetch('/import_playlist',{method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({url})})).json()); }
   catch(e){ box.innerHTML='<div class="item">导入失败</div>'; return; }
+  if(batch_id === curBatchId && batchTimer) return;  // 追加到进行中的批次，沿用现有轮询
   curBatchId = batch_id;
   if(batchTimer) clearInterval(batchTimer);
+  box.innerHTML = '<div class="item">解析歌单中…</div>';
   let lastDone = -1;
   batchTimer = setInterval(async () => {
     let b; try { b = await (await fetch('/batch/'+batch_id)).json(); } catch(e){ return; }
@@ -1024,9 +1071,14 @@ async function importPlaylist(){
 function renderBatch(b){
   const box = document.getElementById('results');
   if(b.error){ box.innerHTML = '<div class="item">'+b.error+'</div>'; return; }
-  if(b.stage==='enumerating'){ box.innerHTML = '<div class="item">解析歌单中…</div>'; return; }
+  if(!b.items || (!b.items.length && b.enumerating>0)){
+    box.innerHTML = '<div class="item">解析歌单中…</div>'; return;
+  }
   const done = b.items.filter(it=>it.status==='done'||it.status==='exists').length;
-  let html = `<div class="batchhead"><span>歌单 ${done}/${b.items.length} 完成</span>`;
+  let head = `歌单 ${done}/${b.items.length} 完成`;
+  if(b.sources>1) head += ` · 共 ${b.sources} 个歌单`;
+  if(b.enumerating>0) head += ` · 解析新歌单中…`;
+  let html = `<div class="batchhead"><span>${head}</span>`;
   if(b.status==='running') html += `<button class="dl stop" onclick="cancelBatch()">■ 停止全部</button>`;
   html += `</div>`;
   b.items.forEach((it,i) => {

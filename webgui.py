@@ -541,8 +541,11 @@ PAGE = """<!doctype html>
   * { box-sizing:border-box; }
   body { margin:0; height:100vh; display:flex; color:var(--txt);
          font-family:-apple-system,system-ui,sans-serif; background:var(--bg); }
-  .side { width:340px; flex:none; background:var(--panel); border-right:1px solid var(--line);
+  .side { width:340px; flex:none; background:var(--panel);
           display:flex; flex-direction:column; height:100vh; min-height:0; }
+  .resizer { flex:none; width:6px; cursor:col-resize; background:var(--line);
+             transition:background .12s; }
+  .resizer:hover, .resizer.dragging { background:var(--blue); }
   .panel { display:flex; flex-direction:column; min-height:0; }
   .panelhead { display:flex; align-items:center; justify-content:space-between; gap:8px;
                width:100%; text-align:left; background:none; border:none; cursor:pointer;
@@ -586,7 +589,9 @@ PAGE = """<!doctype html>
   .libitem.active { background:var(--blue); }
   .libitem .ln { flex:1; min-width:0; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .libitem .stemdl { flex:none; font-size:11px; color:var(--mut); text-decoration:none;
-                     padding:3px 6px; border:1px solid var(--line); border-radius:6px; }
+                     padding:3px 6px; border:1px solid var(--line); border-radius:6px;
+                     display:none; }
+  .libitem:hover .stemdl, .libitem.active .stemdl { display:inline-block; }
   .libitem .stemdl:hover { color:#fff; border-color:var(--blue); }
   .libitem .pn { flex:none; font-size:12px; color:var(--mut); cursor:pointer;
                  padding:3px 6px; border:1px solid var(--line); border-radius:6px; background:none; }
@@ -669,6 +674,7 @@ PAGE = """<!doctype html>
       <div id="queue" class="queue tabpane" style="display:none"></div>
     </div>
   </div>
+  <div class="resizer" id="resizer" title="拖拽调整宽度，双击复位"></div>
   <div class="main">
     <div id="song" class="song empty">从右边歌库选一首，或上方搜索下载</div>
     <div id="lyrics" class="lyrics"></div>
@@ -719,10 +725,40 @@ function togglePanel(id){
   p.classList.toggle('collapsed');
   localStorage.setItem('panel.'+id, p.classList.contains('collapsed') ? '1' : '0');
 }
+function initResizer(){
+  const side = document.querySelector('.side');
+  const rez = document.getElementById('resizer');
+  const saved = parseInt(localStorage.getItem('sideWidth'), 10);
+  if(saved) side.style.width = saved + 'px';
+  let startX = 0, startW = 0;
+  function onMove(e){
+    const w = Math.min(640, Math.max(240, startW + (e.clientX - startX)));
+    side.style.width = w + 'px';
+  }
+  function onUp(){
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    rez.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    localStorage.setItem('sideWidth', parseInt(side.getBoundingClientRect().width, 10));
+  }
+  rez.addEventListener('mousedown', e => {
+    startX = e.clientX; startW = side.getBoundingClientRect().width;
+    rez.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+  rez.addEventListener('dblclick', () => {
+    side.style.width = '340px'; localStorage.removeItem('sideWidth');
+  });
+}
 function restoreUI(){
   if(localStorage.getItem('panel.searchpanel') === '1')
     document.getElementById('searchpanel').classList.add('collapsed');
   switchTab(localStorage.getItem('activeTab') || 'lib');
+  initResizer();
 }
 
 async function loadLibrary(){

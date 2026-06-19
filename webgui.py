@@ -543,18 +543,31 @@ PAGE = """<!doctype html>
          font-family:-apple-system,system-ui,sans-serif; background:var(--bg); }
   .side { width:340px; flex:none; background:var(--panel); border-right:1px solid var(--line);
           display:flex; flex-direction:column; height:100vh; min-height:0; }
-  .side h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em;
-             color:var(--mut); margin:12px 16px 6px; }
-  .searchbox { padding:10px 16px; border-bottom:1px solid var(--line); flex:none; }
+  .panel { display:flex; flex-direction:column; min-height:0; }
+  .panelhead { display:flex; align-items:center; justify-content:space-between; gap:8px;
+               width:100%; text-align:left; background:none; border:none; cursor:pointer;
+               color:var(--mut); font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+               padding:11px 16px; border-bottom:1px solid var(--line); }
+  .panelhead .chev { transition:transform .15s; }
+  .panel.collapsed .panelhead .chev { transform:rotate(-90deg); }
+  .panel.collapsed .panelbody { display:none; }
+  .panelbody { display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+  .tabs-panel { flex:1 1 0; min-height:0; }
+  .tabbar { display:flex; flex:none; border-bottom:1px solid var(--line); }
+  .tab { flex:1; background:none; border:none; cursor:pointer; color:var(--mut);
+         font-size:12px; text-transform:uppercase; letter-spacing:.06em; padding:11px 8px;
+         border-bottom:2px solid transparent; }
+  .tab.active { color:var(--txt); border-bottom-color:var(--blue); }
+  .tab .cnt { font-weight:400; text-transform:none; color:var(--mut); }
+  .tabpane { flex:1 1 0; min-height:0; overflow:auto; }
+  .searchbox { padding:10px 16px; flex:none; }
   .searchbox input { width:100%; padding:9px 12px; border-radius:10px; border:1px solid var(--line);
                      background:#0f1124; color:var(--txt); font-size:14px; }
   .searchbox button { margin-top:6px; width:100%; padding:9px; border:none; border-radius:10px;
                       background:var(--blue); color:#fff; font-size:14px; cursor:pointer; }
   .searchbox .local { background:#374151; padding:8px; font-size:13px; }
   .sep { text-align:center; color:var(--mut); font-size:11px; margin:7px 0 1px; }
-  .results, .lib { overflow:auto; }
-  .results { border-bottom:1px solid var(--line); max-height:32vh; flex:none; }
-  .lib { flex:1 1 0; min-height:140px; }
+  .results { overflow:auto; border-bottom:1px solid var(--line); max-height:32vh; flex:none; }
   .item { display:flex; gap:10px; align-items:center; padding:9px 14px; cursor:pointer;
           border-bottom:1px solid var(--line); }
   .item:hover { background:#22254a; }
@@ -578,8 +591,7 @@ PAGE = """<!doctype html>
   .libitem .pn { flex:none; font-size:12px; color:var(--mut); cursor:pointer;
                  padding:3px 6px; border:1px solid var(--line); border-radius:6px; background:none; }
   .libitem .pn:hover { color:#fff; border-color:var(--pink); }
-  .queue { overflow:auto; flex:none; max-height:26vh; }
-  #queuehd #qcount { color:var(--mut); font-weight:400; }
+  .qitem.empty, .libitem.empty { color:var(--mut); justify-content:center; padding:16px; }
   .qitem { display:flex; align-items:center; gap:8px; padding:8px 12px 8px 16px;
            border-bottom:1px solid var(--line); font-size:13px; }
   .qitem .qn { flex:none; width:18px; color:var(--mut); text-align:right; }
@@ -628,24 +640,34 @@ PAGE = """<!doctype html>
 </head>
 <body>
   <div class="side">
-    <div class="searchbox">
-      <h2 style="margin:0 0 8px">搜索或粘贴 YouTube 链接</h2>
-      <input id="q" placeholder="歌名、歌手，或 YouTube 视频链接"
-             onkeydown="if(event.key==='Enter')doSearch()">
-      <button onclick="doSearch()">🔍 搜索 / 下载</button>
-      <div class="sep">— 或 —</div>
-      <input id="file" type="file" accept="audio/*" style="display:none" onchange="importLocal(this)">
-      <button class="local" onclick="document.getElementById('file').click()">📁 选择本地文件分离</button>
-      <div class="sep">— 或 整个歌单 —</div>
-      <input id="pl" placeholder="粘贴 Spotify / YouTube / Bilibili 歌单链接"
-             onkeydown="if(event.key==='Enter')importPlaylist()">
-      <button class="local" onclick="importPlaylist()">📜 导入整个歌单</button>
+    <div class="panel" id="searchpanel">
+      <button class="panelhead" onclick="togglePanel('searchpanel')">
+        <span>🔍 搜索 / 导入</span><span class="chev">▾</span>
+      </button>
+      <div class="panelbody">
+        <div class="searchbox">
+          <input id="q" placeholder="歌名、歌手，或 YouTube 视频链接"
+                 onkeydown="if(event.key==='Enter')doSearch()">
+          <button onclick="doSearch()">🔍 搜索 / 下载</button>
+          <div class="sep">— 或 —</div>
+          <input id="file" type="file" accept="audio/*" style="display:none" onchange="importLocal(this)">
+          <button class="local" onclick="document.getElementById('file').click()">📁 选择本地文件分离</button>
+          <div class="sep">— 或 整个歌单 —</div>
+          <input id="pl" placeholder="粘贴 Spotify / YouTube / Bilibili 歌单链接"
+                 onkeydown="if(event.key==='Enter')importPlaylist()">
+          <button class="local" onclick="importPlaylist()">📜 导入整个歌单</button>
+        </div>
+        <div id="results" class="results"></div>
+      </div>
     </div>
-    <div id="results" class="results"></div>
-    <h2>我的歌库</h2>
-    <div id="lib" class="lib"></div>
-    <h2 id="queuehd" style="display:none">🎵 待唱队列 <span id="qcount"></span></h2>
-    <div id="queue" class="queue"></div>
+    <div class="panel tabs-panel">
+      <div class="tabbar">
+        <button class="tab active" id="tab-lib"   onclick="switchTab('lib')">🎤 我的歌库 <span id="libcount" class="cnt"></span></button>
+        <button class="tab"        id="tab-queue" onclick="switchTab('queue')">🎵 待唱队列 <span id="qcount" class="cnt"></span></button>
+      </div>
+      <div id="lib"   class="lib tabpane"></div>
+      <div id="queue" class="queue tabpane" style="display:none"></div>
+    </div>
   </div>
   <div class="main">
     <div id="song" class="song empty">从右边歌库选一首，或上方搜索下载</div>
@@ -684,8 +706,28 @@ function isYouTubeUrl(s){
   }
 }
 
+function switchTab(name){
+  const isLib = name === 'lib';
+  document.getElementById('lib').style.display   = isLib ? '' : 'none';
+  document.getElementById('queue').style.display = isLib ? 'none' : '';
+  document.getElementById('tab-lib').classList.toggle('active', isLib);
+  document.getElementById('tab-queue').classList.toggle('active', !isLib);
+  localStorage.setItem('activeTab', name);
+}
+function togglePanel(id){
+  const p = document.getElementById(id);
+  p.classList.toggle('collapsed');
+  localStorage.setItem('panel.'+id, p.classList.contains('collapsed') ? '1' : '0');
+}
+function restoreUI(){
+  if(localStorage.getItem('panel.searchpanel') === '1')
+    document.getElementById('searchpanel').classList.add('collapsed');
+  switchTab(localStorage.getItem('activeTab') || 'lib');
+}
+
 async function loadLibrary(){
   const songs = await (await fetch('/library')).json();
+  document.getElementById('libcount').textContent = songs.length ? '('+songs.length+')' : '';
   const el = document.getElementById('lib');
   el.innerHTML = songs.length ? '' : '<div class="libitem empty">还没有处理过的歌</div>';
   for(const s of songs){
@@ -732,17 +774,15 @@ async function skipNext(){ await fetch('/queue/next', {method:'POST'}); loadLyri
 async function queueRemove(i){ await POSTJSON('/queue/remove', {index:i}); }
 async function queuePrioritize(i){ await POSTJSON('/queue/prioritize', {index:i}); }
 
-let lastQueueKey = '';
+let lastQueueKey = null;
 function renderQueue(queue){
   queue = queue || [];
   const key = queue.map(q=>q.id).join('|');
   if(key === lastQueueKey) return;   // 没变就不重绘，避免闪烁
   lastQueueKey = key;
-  const hd = document.getElementById('queuehd');
   const box = document.getElementById('queue');
   document.getElementById('qcount').textContent = queue.length ? '('+queue.length+')' : '';
-  hd.style.display = queue.length ? '' : 'none';
-  box.innerHTML = '';
+  box.innerHTML = queue.length ? '' : '<div class="qitem empty">队列为空</div>';
   queue.forEach((q, i) => {
     const d = document.createElement('div');
     d.className = 'qitem';
@@ -1029,6 +1069,7 @@ async function setDevice(){
     body:JSON.stringify({device})});
 }
 
+restoreUI();
 loadLibrary();
 loadDevices();
 setInterval(tick, 500);
